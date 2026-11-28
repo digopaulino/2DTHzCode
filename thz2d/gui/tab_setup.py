@@ -9,6 +9,7 @@ import pyqtgraph as pg
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from .. import processing as P
+from ..camware_ini import list_presets, read_camware_ini
 from .common import CH_COLORS, MINUS_COLOR, PLUS_COLOR, Model, dspin, ispin, plot_widget
 
 TRIGGERS = ["external exposure start & software trigger", "auto sequence", "software trigger",
@@ -131,6 +132,30 @@ class SetupTab(QtWidgets.QWidget):
         self.lbl_cam.setWordWrap(True)
         self.lbl_cam.setStyleSheet("color:#aaa;")
         f.addRow(self.lbl_cam)
+
+        # Camware presets: pick an .ini saved from Camware instead of typing the settings
+        r = QtWidgets.QHBoxLayout()
+        self.cmb_preset = QtWidgets.QComboBox()
+        self.cmb_preset.setToolTip("Camware .ini files in the preset folder")
+        btn_pdir = QtWidgets.QPushButton("Folder…")
+        btn_pload = QtWidgets.QPushButton("Load")
+        r.addWidget(self.cmb_preset, 1)
+        r.addWidget(btn_pdir)
+        r.addWidget(btn_pload)
+        f.addRow("Camware preset", r)
+        r = QtWidgets.QHBoxLayout()
+        self.chk_preset = QtWidgets.QCheckBox("apply preset on Connect")
+        self.chk_preset.setChecked(cs.apply_preset_on_connect)
+        btn_prep = QtWidgets.QPushButton("What was read?")
+        r.addWidget(self.chk_preset)
+        r.addWidget(btn_prep)
+        f.addRow(r)
+        btn_pdir.clicked.connect(self._preset_folder)
+        btn_pload.clicked.connect(lambda: self._load_preset(show=True))
+        btn_prep.clicked.connect(self._show_preset_report)
+        self.chk_preset.toggled.connect(lambda v: self.store.update("camera", apply_preset_on_connect=v))
+        self._preset_report = []
+        self._fill_presets()
 
         self.sp_exp = dspin(cs.exposure_us, 0.01, 1e6, 2, 10, "µs")
         self.sp_del = dspin(cs.delay_us, 0, 1e6, 2, 1, "µs")
@@ -310,9 +335,76 @@ class SetupTab(QtWidgets.QWidget):
                           record_mode=self.cmb_rec.currentText(), fifo_frames=self.sp_fifo.value())
 
     def _connect_camera(self):
+        if self.chk_preset.isChecked() and self.cmb_preset.currentData():
+            self._load_preset(show=False, configure=False)
         self._camera_to_store()
         self.lbl_cam.setText("connecting …")
         self.worker.submit("connect_camera")
+
+    # ---------------------------------------------------------------- Camware presets
+    def _fill_presets(self):
+        cs = self.store.get("camera")
+        self.cmb_preset.clear()
+        files = list_presets(cs.preset_dir) if cs.preset_dir else []
+        if cs.preset_file and Path(cs.preset_file).exists() and Path(cs.preset_file) not in files:
+            files.insert(0, Path(cs.preset_file))
+        for fpath in files:
+            self.cmb_preset.addItem(fpath.name, str(fpath))
+        if not files:
+            self.cmb_preset.addItem("(choose a folder with Camware .ini files)", "")
+        if cs.preset_file:
+            i = self.cmb_preset.findData(cs.preset_file)
+            if i >= 0:
+                self.cmb_preset.setCurrentIndex(i)
+
+    def _preset_folder(self):
+        cs = self.store.get("camera")
+        d = QtWidgets.QFileDialog.getExistingDirectory(self, "Folder with Camware .ini presets",
+                                                       cs.preset_dir or str(Path.home()))
+        if d:
+            self.store.update("camera", preset_dir=d)
+            self._fill_presets()
+
+    def _load_preset(self, show=True, configure=True):
+        path = self.cmb_preset.currentData()
+        if not path:
+            QtWidgets.QMessageBox.information(self, "Camware preset", "Choose the folder with the .ini files first.")
+            return
+        try:
+            upd, report = read_camware_ini(path)
+        except Exception as e:
+            QtWidgets.QMessageBox.warning(self, "Camware preset", f"Could not read {path}:\n{e}")
+            return
+        self.store.update("camera", preset_file=path, **upd)
+        self._camera_from_store()
+        self._preset_report = report
+        self.worker.status.emit(f"preset {Path(path).name}: " + "; ".join(
+            line for line in report if "<-" in line or "NOT FOUND" in line))
+        if show:
+            self._show_preset_report()
+        if configure and self.worker.camera is not None:
+            self.worker.submit("configure_camera")
+
+    def _show_preset_report(self):
+        text = "\n".join(self._preset_report) if self._preset_report else "No preset loaded yet."
+        box = QtWidgets.QMessageBox(self)
+        box.setWindowTitle("Camware preset")
+        box.setText("Settings taken from the preset (check them):")
+        box.setDetailedText(text)
+        box.setInformativeText("\n".join(l for l in self._preset_report if "<-" in l or "NOT FOUND" in l
+                                         or l.startswith("note") or l.startswith("timestamp:")))
+        box.exec()
+
+    def _camera_from_store(self):
+        cs = self.store.get("camera")
+        self.sp_exp.setValue(cs.exposure_us)
+        self.sp_del.setValue(cs.delay_us)
+        for sp, v in zip(self.sp_roi, cs.roi):
+            sp.setValue(int(v))
+        self.sp_rows.setValue(int(cs.roi[3] - cs.roi[1] + 1))
+        if self.cmb_trig.findText(cs.trigger) < 0:
+            self.cmb_trig.addItem(cs.trigger)
+        self.cmb_trig.setCurrentText(cs.trigger)
 
     def _apply_camera(self):
         self._camera_to_store()

@@ -7,7 +7,7 @@ from pathlib import Path
 from pyqtgraph.Qt import QtCore, QtWidgets
 
 from .. import processing as P
-from ..hardware import list_serial_ports
+from ..hardware import list_gpib_resources, list_serial_ports
 from .common import BigNumber, Model, dspin, ispin, timestamp_name
 
 
@@ -190,23 +190,36 @@ class StagePanel(QtWidgets.QGroupBox):
         self.cmb_backend = QtWidgets.QComboBox()
         self.cmb_backend.addItems(["esp301", "simulated"])
         self.cmb_backend.setCurrentText(ss.backend)
+        self.cmb_iface = QtWidgets.QComboBox()
+        self.cmb_iface.addItem("GPIB", "gpib")
+        self.cmb_iface.addItem("Serial / USB", "serial")
+        self.cmb_iface.setCurrentIndex(0 if ss.interface == "gpib" else 1)
         self.cmb_port = QtWidgets.QComboBox()
         self.cmb_port.setEditable(True)
-        self._refresh_ports()
-        self.cmb_port.setCurrentText(ss.port)
+        self.cmb_port.setToolTip("GPIB: VISA resource, e.g. GPIB0::1::INSTR (board 0, address 1)\n"
+                                 "Serial: COM port")
+        self.cmb_port.setCurrentText(ss.resource if ss.interface == "gpib" else ss.port)
         self.cmb_baud = QtWidgets.QComboBox()
         self.cmb_baud.setEditable(True)
         self.cmb_baud.addItems(["921600", "19200"])
         self.cmb_baud.setCurrentText(str(ss.baudrate))
         form.addRow("Controller", self.cmb_backend)
+        form.addRow("Connection", self.cmb_iface)
         pr = QtWidgets.QHBoxLayout()
         pr.addWidget(self.cmb_port, 1)
-        btn_ref = QtWidgets.QPushButton("↻")
-        btn_ref.setFixedWidth(28)
+        btn_ref = QtWidgets.QPushButton("Refresh")
+        btn_ref.setToolTip("list the GPIB instruments (or serial ports) that are found")
         btn_ref.clicked.connect(self._refresh_ports)
         pr.addWidget(btn_ref)
-        form.addRow("Port", pr)
-        form.addRow("Baud", self.cmb_baud)
+        self.lbl_port = QtWidgets.QLabel("Address")
+        form.addRow(self.lbl_port, pr)
+        self.lbl_baud = QtWidgets.QLabel("Baud")
+        form.addRow(self.lbl_baud, self.cmb_baud)
+        self.lbl_found = QtWidgets.QLabel("")
+        self.lbl_found.setStyleSheet("color:#aaa;")
+        self.lbl_found.setWordWrap(True)
+        form.addRow(self.lbl_found)
+        self.cmb_iface.currentIndexChanged.connect(self._iface_changed)
         lay.addLayout(form)
         row = QtWidgets.QHBoxLayout()
         self.btn_connect = QtWidgets.QPushButton("Connect")
@@ -287,6 +300,7 @@ class StagePanel(QtWidgets.QGroupBox):
         self.btn_on.clicked.connect(lambda: self.worker.submit("stage_motor_on", axis=self.axis()))
         self.btn_stop.clicked.connect(self.worker.stop_stage_now)
 
+        self._iface_changed()
         worker.stage_state.connect(self._state)
         worker.stage_position.connect(self._position)
         self._update_mm_label()
@@ -296,11 +310,34 @@ class StagePanel(QtWidgets.QGroupBox):
     def axis(self) -> int:
         return 1 if self.rb1.isChecked() else 2
 
-    def _refresh_ports(self):
-        cur = self.cmb_port.currentText()
+    def _iface_changed(self, *_):
+        gpib = self.cmb_iface.currentData() == "gpib"
+        self.lbl_baud.setVisible(not gpib)
+        self.cmb_baud.setVisible(not gpib)
+        self.lbl_port.setText("Address" if gpib else "Port")
+        ss = self.store.get("stage")
         self.cmb_port.clear()
-        self.cmb_port.addItems(list_serial_ports() or ["COM3"])
-        if cur:
+        self.cmb_port.setCurrentText(ss.resource if gpib else ss.port)
+        self.lbl_found.setText("")
+
+    def _refresh_ports(self):
+        """List what is attached: GPIB instruments through VISA, or serial ports."""
+        cur = self.cmb_port.currentText()
+        if self.cmb_iface.currentData() == "gpib":
+            try:
+                found = list_gpib_resources()
+            except Exception as e:
+                self.lbl_found.setText(f"⚠ {e}")
+                return
+            msg = (f"{len(found)} GPIB instrument(s): " + ", ".join(found)) if found else \
+                "no GPIB instruments found (cable, power, NI-488.2 driver?)"
+        else:
+            found = list_serial_ports()
+            msg = ("serial ports: " + ", ".join(found)) if found else "no serial ports found"
+        self.lbl_found.setText(msg)
+        self.cmb_port.clear()
+        self.cmb_port.addItems(found)
+        if cur and (cur in found or not found):
             self.cmb_port.setCurrentText(cur)
 
     def _connect(self):
@@ -308,8 +345,14 @@ class StagePanel(QtWidgets.QGroupBox):
             baud = int(self.cmb_baud.currentText())
         except ValueError:
             baud = 921600
-        self.store.update("stage", backend=self.cmb_backend.currentText(), port=self.cmb_port.currentText(),
-                          baudrate=baud, rtscts=(baud == 19200))
+        iface = self.cmb_iface.currentData()
+        addr = self.cmb_port.currentText().strip()
+        kw = dict(backend=self.cmb_backend.currentText(), interface=iface)
+        if iface == "gpib":
+            kw["resource"] = addr
+        else:
+            kw.update(port=addr, baudrate=baud, rtscts=(baud == 19200))
+        self.store.update("stage", **kw)
         self.lbl_state.setText("connecting …")
         self.worker.submit("connect_stage")
 

@@ -34,6 +34,9 @@ class CameraSettings:
     fifo_frames: int = 400              # driver buffer size in fifo mode
     frame_timeout_s: float = 2.0        # warn if no frame arrives within this time
     sim_rate_hz: float = 1000.0         # simulated camera only
+    preset_dir: str = ""                # folder with Camware .ini presets
+    preset_file: str = ""               # last preset used
+    apply_preset_on_connect: bool = True
 
 
 @dataclass
@@ -69,7 +72,9 @@ class TimeAxisSettings:
 @dataclass
 class StageSettings:
     backend: str = "simulated"          # "esp301" or "simulated"
-    port: str = "COM3"
+    interface: str = "gpib"             # "gpib" (VISA) or "serial"
+    resource: str = "GPIB0::1::INSTR"   # VISA resource for GPIB
+    port: str = "COM3"                  # serial only
     baudrate: int = 921600              # USB virtual COM port; RS-232 is 19200
     rtscts: bool = False                # hardware handshake (needed on the RS-232 port)
     axis: int = 1

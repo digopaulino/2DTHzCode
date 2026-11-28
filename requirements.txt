@@ -1,6 +1,7 @@
 numpy>=1.22
 pyqtgraph>=0.13
 PySide6>=6.5        # (PyQt5/PyQt6 also work with pyqtgraph)
-pyserial>=3.5       # Newport ESP301
+pyvisa>=1.12        # Newport ESP301 over GPIB (needs NI-VISA / NI-488.2)
+pyserial>=3.5       # Newport ESP301 over serial/USB (optional)
 pco>=2.6            # Excelitas PCO official package (Windows / Linux); not needed for --sim
 pytest              # tests only

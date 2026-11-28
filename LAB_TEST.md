@@ -5,7 +5,7 @@ steps have already shown to work. The `diagnose` commands write a `diagnose_*.tx
 anything fails, keep that file and the text of the GUI's **Log** box.
 
 Leave the LabVIEW program installed and closed. Only one program at a time can open the
-camera, and the same goes for the ESP301 COM port.
+camera, and the same goes for the ESP301. Close Camware too.
 
 ---
 
@@ -17,7 +17,7 @@ python -m venv .venv
 .venv\Scripts\pip install -r requirements.txt
 .venv\Scripts\python -m pytest -q
 ```
-☐ The tests end with `25 passed`.
+☐ The tests end with `32 passed`.
 ☐ `.venv\Scripts\python -m thz2d --sim` opens the GUI and *Run* shows traces. Close it again.
 
 ## 1. Camera on its own (laser not needed)
@@ -26,8 +26,15 @@ Close Camware, then:
 ```bat
 .venv\Scripts\python -m thz2d.diagnose camera --trigger auto --frames 2000
 ```
-☐ `camera opened`. If not: pass `--interface "USB 3.0"` or `--interface CLHS`, and check
-  that Camware is closed.
+☐ `camera opened`. If not, the report lists the error for **each interface** it tried.
+  Keep that file. The usual causes:
+  - Camware still open (check the system tray too);
+  - the PCO driver for the interface (USB 3 driver, or the CLHS / Camera Link frame-grabber
+    runtime) not installed;
+  - 32-bit Python.
+
+  If you know the interface, pass it: `--interface "USB 3.0"`, `--interface CLHS` or
+  `--interface "Camera Link ME4"`.
 ☐ `description['roi is vert symmetric']` is listed. The program centres the ROI
   automatically.
 ☐ In **both** `fifo` and `sequence` mode, every line reads `[ OK ]`. In particular:
@@ -52,21 +59,34 @@ The trigger cable goes from the laser timing output to the camera's trigger inpu
   helps.
 ☐ `max` is well below 65000 (not saturated) but clearly above the dark level. If not,
   change `--exposure`.
+☐ With a Camware preset (an `.ini` saved from Camware with your usual settings):
+  ```bat
+  .venv\Scripts\python -m thz2d.diagnose camera --preset C:\path\to\preset.ini --frames 4000
+  ```
+  The `preset:` lines show what was read from the file. Check exposure, ROI and trigger.
+  If something is missing or wrong, bring the `.ini` file back so the reader can be fixed.
 
 ## 3. Delay stage
 
+The ESP301 is on **GPIB**. This needs NI-488.2 / NI-VISA, which LabVIEW normally
+installs already.
 ```bat
 .venv\Scripts\python -m thz2d.diagnose ports
-.venv\Scripts\python -m thz2d.diagnose stage --port COMx
+.venv\Scripts\python -m thz2d.diagnose stage --gpib GPIB0::1::INSTR
 ```
+☐ `ports` lists the GPIB instruments, e.g. `GPIB0::1::INSTR`. The last number is the
+  GPIB address set on the ESP301 (check its front-panel menu or NI MAX). Use that resource
+  name below.
 ☐ `connected: <firmware version>`, and both axes report a position.
-  - If it fails: USB port → baud 921600; RS-232 port → add `--baud 19200`.
+  - If `ports` finds nothing: open NI MAX → *Scan for instruments*. If NI MAX does not
+    see it either, check the cable and the controller.
+  - If it says *no VISA library*: install NI-VISA.
   - If it says *units code ≠ 2*: set the axis to mm in the ESP utility.
 
 Make sure there is room for a 10 µm move, then:
 ```bat
-.venv\Scripts\python -m thz2d.diagnose stage --port COMx --move --axis 1
-.venv\Scripts\python -m thz2d.diagnose stage --port COMx --move --axis 2
+.venv\Scripts\python -m thz2d.diagnose stage --gpib GPIB0::1::INSTR --move --axis 1
+.venv\Scripts\python -m thz2d.diagnose stage --gpib GPIB0::1::INSTR --move --axis 2
 ```
 ☐ Each axis moves +0.010 mm and returns.
 
@@ -76,14 +96,17 @@ Make sure there is room for a 10 µm move, then:
 
 1. **Setup tab → Camera:**
    - Backend `pco`, Interface as in step 1.
-   - Rows = 64 → *Centre ROI vertically*.
-   - Exposure as found in step 2.
-   - Trigger `external exposure start…`, Record mode `fifo` (or `sequence` if step 1 said so).
+   - **Camware preset:** *Folder…* → the folder with your Camware `.ini` files, pick one,
+     then *Load*. A window shows what was read. Leave *apply preset on Connect* ticked so it
+     is used every time you start. Without a preset: Rows = 64 → *Centre ROI vertically*,
+     exposure from step 2, Trigger `external exposure start…`.
+   - Record mode `fifo` (or `sequence` if step 1 said so).
    - *Connect*.
 
    ☐ The live feed at the top shows the two beam-array stripes.
 2. **Stage panel:**
-   - Controller `esp301`, Port `COMx`, *Connect*.
+   - Controller `esp301`, Connection `GPIB`, *Refresh*, then pick the ESP301's address,
+     then *Connect*.
 
    ☐ The position matches the ESP301 front panel.
    - Try *Go to* (a nearby position), then −τ / +τ with 100 fs.
@@ -166,5 +189,5 @@ Run N = 500 continuously for ~10 min with *autosave* on.
 * Saved `.npz` files from step 5 (both pumps on, A blocked, B blocked) and step 6, plus the
   LabVIEW file from step 6.
 * Notes on anything you changed: record mode, *A chopped at laser/2*, manual REF position,
-  mirror, optical passes, baud.
+  mirror, optical passes, GPIB address, which Camware preset.
 * A screenshot of each tab.

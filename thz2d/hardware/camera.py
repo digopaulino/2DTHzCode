@@ -78,20 +78,40 @@ class PcoCamera(CameraBase):
         self.fifo_overflow = False
 
     # -------------------------------------------------------------- connection
+    INTERFACES = ["USB 3.0", "CLHS", "Camera Link ME4", "Camera Link MTX", "Camera Link NAT", "GigE",
+                  "GenICam", "USB 2.0", "FireWire"]
+
     def open(self, interface: str = "", serial: int = 0) -> None:
+        import platform
         try:
             import pco  # official Excelitas PCO package
-        except ImportError as e:  # pragma: no cover - depends on lab PC
-            raise CameraError("The 'pco' package is not installed: run  pip install pco") from e
+        except Exception as e:  # pragma: no cover - depends on lab PC
+            raise CameraError(f"cannot import the 'pco' package ({type(e).__name__}: {e}). "
+                              "Install it with  pip install pco  (64-bit Python required).") from e
         kw = {}
-        if interface:
-            kw["interface"] = interface
         if serial:
             kw["serial"] = int(serial)
         try:
-            self.cam = pco.Camera(**kw)
+            self.cam = pco.Camera(interface=interface, **kw) if interface else pco.Camera(**kw)
+            return
         except Exception as e:  # pragma: no cover
-            raise CameraError(f"Could not open the PCO camera ({e}). Is Camware closed?") from e
+            first = f"{type(e).__name__}: {e}"
+        # retry interface by interface to collect the individual error messages
+        details = []
+        for itf in ([interface] if interface else self.INTERFACES):
+            try:
+                self.cam = pco.Camera(interface=itf, **kw)
+                return
+            except Exception as e:  # pragma: no cover
+                details.append(f"  {itf}: {type(e).__name__}: {e}")
+        raise CameraError(
+            "Could not open the PCO camera.\n"
+            f"pco package {getattr(pco, '__version__', '?')}, Python {platform.python_version()} "
+            f"{platform.architecture()[0]}\n"
+            f"first error: {first}\nper interface:\n" + "\n".join(details) + "\n"
+            "Check: Camware (or another program) closed? camera powered and cable in? "
+            "PCO driver for this interface installed (USB 3 driver, or the CLHS / Camera Link "
+            "frame-grabber runtime)? Does Camware itself see the camera?")
 
     def close(self) -> None:
         if self.cam is not None:

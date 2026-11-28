@@ -1,4 +1,4 @@
-"""Newport ESP301 motion controller (ASCII command set over RS-232 / USB virtual COM port).
+"""Newport ESP301 motion controller (ASCII command set over GPIB, RS-232 or USB).
 
 Commands used (ESP301 user manual, section 3):
     xxMO      motor on                  xxMF      motor off
@@ -10,8 +10,11 @@ Commands used (ESP301 user manual, section 3):
     VE?       firmware version
 Commands are terminated with CR; replies end with CR LF.
 
-The USB port of the ESP301 appears as a virtual COM port at 921600 baud.
-The RS-232 port defaults to 19200 baud with RTS/CTS hardware handshake.
+Connections
+* GPIB (default in this lab): through VISA (PyVISA + NI-VISA / NI-488.2), resource names
+  like ``GPIB0::1::INSTR`` (board 0, primary address 1 - the address is set on the ESP301).
+* Serial: the USB port appears as a virtual COM port at 921600 baud; the RS-232 port
+  defaults to 19200 baud with RTS/CTS hardware handshake.
 """
 
 from __future__ import annotations
@@ -31,6 +34,111 @@ def list_serial_ports() -> List[str]:
         return [p.device for p in list_ports.comports()]
     except Exception:
         return []
+
+
+def _resource_manager():
+    """PyVISA resource manager: NI-VISA (or Keysight VISA) first, pure-python backend as fallback."""
+    try:
+        import pyvisa
+    except ImportError as e:
+        raise StageError("PyVISA is not installed: pip install pyvisa") from e
+    errors = []
+    for backend in ("", "@py"):
+        try:
+            return pyvisa.ResourceManager(backend) if backend else pyvisa.ResourceManager()
+        except Exception as e:  # no VISA library found
+            errors.append(f"{backend or 'system VISA'}: {e}")
+    raise StageError("no VISA library found (install NI-VISA / NI-488.2). " + " | ".join(errors))
+
+
+def list_gpib_resources() -> List[str]:
+    """GPIB instruments seen by VISA, e.g. ['GPIB0::1::INSTR']. Raises StageError if VISA is missing."""
+    rm = _resource_manager()
+    try:
+        found = list(rm.list_resources("GPIB?*::INSTR"))
+    except Exception:
+        found = []          # list_resources raises when nothing is found on some VISA versions
+    return sorted(found)
+
+
+class SerialTransport:
+    def __init__(self, port: str, baudrate: int = 921600, rtscts: bool = False, timeout: float = 1.0):
+        self.port, self.baudrate, self.rtscts, self.timeout = port, baudrate, rtscts, timeout
+        self.dev = None
+
+    def describe(self) -> str:
+        return f"{self.port} at {self.baudrate} baud"
+
+    def open(self):
+        try:
+            import serial
+        except ImportError as e:
+            raise StageError("pyserial is not installed: pip install pyserial") from e
+        try:
+            self.dev = serial.Serial(self.port, self.baudrate, bytesize=8, parity="N", stopbits=1,
+                                     timeout=self.timeout, rtscts=self.rtscts)
+        except Exception as e:
+            raise StageError(f"cannot open {self.port}: {e}") from e
+        self.dev.reset_input_buffer()
+
+    def close(self):
+        if self.dev is not None:
+            try:
+                self.dev.close()
+            finally:
+                self.dev = None
+
+    def write(self, cmd: str):
+        self.dev.write((cmd + "\r").encode("ascii"))
+
+    def query(self, cmd: str) -> str:
+        self.dev.reset_input_buffer()
+        self.dev.write((cmd + "\r").encode("ascii"))
+        return self.dev.readline().decode("ascii", errors="replace").strip()
+
+
+class VisaTransport:
+    """GPIB (or any VISA resource) through PyVISA."""
+
+    def __init__(self, resource: str, timeout: float = 2.0):
+        self.resource, self.timeout = resource, timeout
+        self.dev = None
+        self.rm = None
+
+    def describe(self) -> str:
+        return self.resource
+
+    def open(self):
+        self.rm = _resource_manager()
+        try:
+            self.dev = self.rm.open_resource(self.resource)
+        except Exception as e:
+            raise StageError(f"cannot open {self.resource}: {e}") from e
+        self.dev.timeout = int(self.timeout * 1000)
+        self.dev.write_termination = "\r"
+        self.dev.read_termination = "\r\n"
+        try:
+            self.dev.clear()          # GPIB device clear: flushes half-finished replies
+        except Exception:
+            pass
+
+    def close(self):
+        if self.dev is not None:
+            try:
+                self.dev.close()
+            finally:
+                self.dev = None
+
+    def write(self, cmd: str):
+        self.dev.write(cmd)
+
+    def query(self, cmd: str) -> str:
+        try:
+            return self.dev.query(cmd).strip()
+        except Exception as e:     # VISA timeout -> behave like an empty serial reply
+            if "timeout" in str(e).lower() or "VI_ERROR_TMO" in str(e):
+                return ""
+            raise StageError(f"{self.resource}: {e}") from e
 
 
 class StageBase:
@@ -54,31 +162,30 @@ class StageBase:
 class ESP301(StageBase):
     name = "ESP301"
 
-    def __init__(self, port: str, baudrate: int = 921600, rtscts: bool = False, timeout: float = 1.0):
-        self.port = port
-        self.baudrate = baudrate
-        self.rtscts = rtscts
-        self.timeout = timeout
-        self.ser = None
+    def __init__(self, transport):
+        self.transport = transport
+        self._open = False
         self._lock = threading.RLock()     # GUI (stop) and acquisition thread may both talk to it
         self._abort = threading.Event()
 
+    @classmethod
+    def gpib(cls, resource: str = "GPIB0::1::INSTR", timeout: float = 2.0) -> "ESP301":
+        return cls(VisaTransport(resource, timeout))
+
+    @classmethod
+    def serial(cls, port: str, baudrate: int = 921600, rtscts: bool = False) -> "ESP301":
+        return cls(SerialTransport(port, baudrate, rtscts))
+
     # ------------------------------------------------------------------ low level
     def connect(self) -> str:
-        try:
-            import serial
-        except ImportError as e:
-            raise StageError("pyserial is not installed: pip install pyserial") from e
-        try:
-            self.ser = serial.Serial(self.port, self.baudrate, bytesize=8, parity="N", stopbits=1,
-                                     timeout=self.timeout, rtscts=self.rtscts)
-        except Exception as e:
-            raise StageError(f"cannot open {self.port}: {e}") from e
-        self.ser.reset_input_buffer()
+        with self._lock:
+            self.transport.open()
+            self._open = True
         ver = self.query("VE?")
         if not ver:
             self.close()
-            raise StageError(f"no answer from ESP301 on {self.port} at {self.baudrate} baud")
+            raise StageError(f"no answer from the ESP301 on {self.transport.describe()} "
+                             "(check the GPIB address / cable, or the baud rate for serial)")
         self._check_error()
         bad_units = []
         for ax in self.axes:
@@ -100,25 +207,23 @@ class ESP301(StageBase):
 
     def close(self):
         with self._lock:
-            if self.ser is not None:
+            if self._open:
                 try:
-                    self.ser.close()
+                    self.transport.close()
                 finally:
-                    self.ser = None
+                    self._open = False
 
     def write(self, cmd: str) -> None:
         with self._lock:
-            if self.ser is None:
+            if not self._open:
                 raise StageError("stage not connected")
-            self.ser.write((cmd + "\r").encode("ascii"))
+            self.transport.write(cmd)
 
     def query(self, cmd: str) -> str:
         with self._lock:
-            if self.ser is None:
+            if not self._open:
                 raise StageError("stage not connected")
-            self.ser.reset_input_buffer()
-            self.ser.write((cmd + "\r").encode("ascii"))
-            return self.ser.readline().decode("ascii", errors="replace").strip()
+            return self.transport.query(cmd)
 
     def _check_error(self) -> None:
         """Read the ESP error buffer; raise on a non-zero code."""
@@ -241,5 +346,7 @@ class SimulatedStage(StageBase):
 
 def make_stage(ss) -> StageBase:
     if ss.backend == "esp301":
-        return ESP301(ss.port, ss.baudrate, ss.rtscts)
+        if ss.interface == "gpib":
+            return ESP301.gpib(ss.resource)
+        return ESP301.serial(ss.port, ss.baudrate, ss.rtscts)
     return SimulatedStage()

@@ -23,6 +23,8 @@ python -m thz2d --sim    # simulated camera + stage, for trying it out on any co
    ```
    `pco` is Excelitas PCO's official Python package. It bundles `pco.sdk` and
    `pco.recorder`, so no separate SDK install is needed.
+   The ESP301 is controlled over **GPIB** through PyVISA. That needs NI-VISA / NI-488.2,
+   which a LabVIEW + GPIB installation normally already has. Serial/USB also works.
 4. Double-click `run_thz2d.bat`, or run `.venv\Scripts\python -m thz2d`.
 5. Tests (no hardware needed): `.venv\Scripts\python -m pytest -q`
 6. First time on the real hardware: follow [LAB_TEST.md](LAB_TEST.md). It starts with
@@ -76,7 +78,9 @@ restarted.
 * **Right side (every tab).**
   * Averaging: **N = 25 / N = 500** presets (or any N), *Run* (continuous), *Single*,
     *Stop*, the shot-order setting, *Save current…* and *autosave* (one `.npz` per block).
-  * ESP301 stage: pick **Motor 1 or 2**, go to an **absolute position in mm**, or step by
+  * ESP301 stage: connect over GPIB. *Refresh* lists the GPIB instruments VISA finds,
+    such as `GPIB0::1::INSTR`. Serial/USB is also available.
+    Pick **Motor 1 or 2**, go to an **absolute position in mm**, or step by
     a **delay in fs** (−τ / +τ). You can also set a Δτ = 0 reference, Motor ON, and STOP.
     The fs → mm conversion uses *optical passes* (2 for a retro-reflector) and *direction*.
     During a continuous run, stage moves are carried out between two blocks.
@@ -113,6 +117,21 @@ restarted.
   * The result is saved to `<autosave folder>/calibration/calib_*.npz`. It is reloaded on
     the next start and stays valid until the optics are realigned.
 
+## Camware presets
+
+Save your usual camera settings from Camware as `.ini` files and keep them in one folder.
+On the Setup tab, *Camware preset → Folder…* lists them. *Load* applies one, and with
+*apply preset on Connect* ticked it is applied every time the camera connects.
+
+The reader picks up exposure and delay (including the time base), ROI, trigger mode,
+pixel rate and timestamp mode. *What was read?* shows exactly which entries it used and
+which it ignored. Camware's key names are not publicly documented, so check that list the
+first time. If a value is missing, send the `.ini` file so the reader can be adjusted.
+
+Some settings are always overridden:
+* the binary timestamp is always switched on (it is needed to detect dropped frames);
+* binning is not applied.
+
 ## Camera notes (pco.edge 4.2)
 
 * To trigger at 1 kHz, use a **short ROI** (64–128 rows). The edge reads out from the sensor
@@ -131,10 +150,11 @@ restarted.
 |---|---|
 | `thz2d/processing.py` | windows, phase detection, channels, calibrations, FFT — pure numpy, unit-tested |
 | `thz2d/hardware/camera.py` | `PcoCamera` (official `pco` package) and a physics-based `SimulatedCamera` |
-| `thz2d/hardware/stage.py` | `ESP301` (ASCII over serial: PA/PR/TP/MD?/ST/TB?…) and `SimulatedStage` |
+| `thz2d/hardware/stage.py` | `ESP301` (ASCII commands PA/PR/TP/MD?/ST/TB?… over GPIB via PyVISA, or serial) and `SimulatedStage` |
+| `thz2d/camware_ini.py` | reads camera presets from Camware `.ini` files and reports what it used |
 | `thz2d/acquisition.py` | acquisition thread (owns the hardware, job queue, block acquisition, calibration scans) |
 | `thz2d/gui/…` | main window, live view, side panel, the three tabs |
-| `tests/test_processing.py` | 25 tests incl. phase detection, NL extraction, both calibrations |
+| `tests/` | 32 tests: phase detection, NL extraction, both calibrations, Camware presets, ESP301 commands |
 
 Saved `.npz` blocks contain, for each channel:
 

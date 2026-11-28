@@ -116,8 +116,17 @@ class AcquisitionThread(QtCore.QThread):
             self.camera.close()
             self.camera = None
         snap = self.store.snapshot()
-        cam = make_camera(snap.camera, stage_positions=lambda: self._sim_positions())
-        cam.configure(snap.camera)
+        try:
+            cam = make_camera(snap.camera, stage_positions=lambda: self._sim_positions())
+        except Exception as e:
+            self.camera_state.emit(False, "connection failed - see the Log box")
+            raise CameraError(str(e)) from e
+        try:
+            cam.configure(snap.camera)
+        except Exception as e:
+            cam.close()
+            self.camera_state.emit(False, "opened, but the settings were rejected - see the Log box")
+            raise CameraError(str(e)) from e
         self.camera = cam
         self.dark = None
         self.camera_state.emit(True, cam.info())
@@ -194,7 +203,11 @@ class AcquisitionThread(QtCore.QThread):
             self.stage = None
         ss = self.store.get("stage")
         st = make_stage(ss)
-        ver = st.connect()
+        try:
+            ver = st.connect()
+        except Exception as e:
+            self.stage_state.emit(False, f"connection failed: {e}")
+            raise StageError(str(e)) from e
         self.stage = st
         self.stage_state.emit(True, f"{st.name}: {ver}")
         self._job_stage_read()

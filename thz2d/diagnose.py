@@ -1,10 +1,12 @@
 """Hardware diagnostics without the GUI - run these first on the lab PC.
 
-    python -m thz2d.diagnose ports
-    python -m thz2d.diagnose camera --trigger auto              # no laser needed
-    python -m thz2d.diagnose camera --trigger external          # laser triggering the camera
-    python -m thz2d.diagnose stage --port COM3                  # read-only
-    python -m thz2d.diagnose stage --port COM3 --move --axis 1  # +0.010 mm and back
+    python -m thz2d.diagnose ports                                  # GPIB instruments + serial ports
+    python -m thz2d.diagnose camera --trigger auto                  # no laser needed
+    python -m thz2d.diagnose camera --trigger external              # laser triggering the camera
+    python -m thz2d.diagnose camera --preset C:\\presets\\edge.ini    # settings from a Camware .ini
+    python -m thz2d.diagnose stage --gpib GPIB0::1::INSTR           # read-only
+    python -m thz2d.diagnose stage --gpib GPIB0::1::INSTR --move --axis 1   # +0.010 mm and back
+    python -m thz2d.diagnose stage --port COM3                      # serial instead of GPIB
 
 Everything printed is also written to diagnose_<date>_<time>.txt in the current folder.
 Add --sim to exercise the script itself with the simulated devices.
@@ -21,7 +23,8 @@ import numpy as np
 
 from .config import CameraSettings
 from .hardware.camera import CameraError, PcoCamera, SimulatedCamera
-from .hardware.stage import ESP301, SimulatedStage, StageError, list_serial_ports
+from .camware_ini import read_camware_ini
+from .hardware.stage import ESP301, SimulatedStage, StageError, list_gpib_resources, list_serial_ports
 
 TRIGGERS = {"auto": "auto sequence", "external": "external exposure start & software trigger"}
 _log_file = None
@@ -46,6 +49,18 @@ def camera(args):
     cs = CameraSettings(backend="pco", interface=args.interface, exposure_us=args.exposure,
                         roi=(1, y0, 2048, y0 + rows - 1), trigger=TRIGGERS[args.trigger],
                         timestamp="binary", fifo_frames=args.fifo, sim_rate_hz=1000.0)
+    if args.preset:
+        try:
+            upd, report = read_camware_ini(args.preset)
+        except Exception as e:
+            ok(False, f"read preset {args.preset}: {e}")
+            return False
+        for line in report:
+            log("    preset: " + line)
+        for k, v in upd.items():
+            setattr(cs, k, v)
+        if args.trigger_given:
+            cs.trigger = TRIGGERS[args.trigger]
     log(f"camera test: trigger={cs.trigger!r}, ROI={cs.roi}, exposure={cs.exposure_us} us")
     if args.sim:
         cam = SimulatedCamera()
@@ -148,16 +163,24 @@ def _camera_stream(cam, mode, n, timeout):
 
 # ============================================================================ stage
 def stage(args):
-    log(f"stage test: port={args.port}, baud={args.baud}, rtscts={args.baud == 19200}")
-    st = SimulatedStage() if args.sim else ESP301(args.port, args.baud, rtscts=(args.baud == 19200))
+    if args.sim:
+        st = SimulatedStage()
+        log("stage test: simulated")
+    elif args.port:
+        st = ESP301.serial(args.port, args.baud, rtscts=(args.baud == 19200))
+        log(f"stage test: serial {args.port}, baud={args.baud}, rtscts={args.baud == 19200}")
+    else:
+        st = ESP301.gpib(args.gpib)
+        log(f"stage test: GPIB resource {args.gpib}")
     good = True
     try:
         ver = st.connect()
         ok(True, f"connected: {ver}")
     except StageError as e:
         ok(False, f"connect: {e}")
-        log("    check: port name (python -m thz2d.diagnose ports), baud (USB 921600, RS-232 19200), "
-            "ESP utility closed")
+        log("    check: GPIB address on the ESP301 front panel matches (python -m thz2d.diagnose ports "
+            "lists what VISA sees), cable, NI-488.2 / NI-VISA installed, LabVIEW / ESP utility closed. "
+            "Serial: port name and baud (USB 921600, RS-232 19200)")
         return False
     try:
         for ax in (1, 2):
@@ -193,6 +216,11 @@ def stage(args):
 
 
 def ports(_args):
+    try:
+        g = list_gpib_resources()
+        log("GPIB instruments (VISA): " + (", ".join(g) if g else "none found"))
+    except StageError as e:
+        log(f"GPIB: {e}")
     p = list_serial_ports()
     log("serial ports: " + (", ".join(p) if p else "none found"))
     return True
@@ -203,7 +231,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
     c = sub.add_parser("camera")
-    c.add_argument("--trigger", choices=list(TRIGGERS), default="auto")
+    c.add_argument("--trigger", choices=list(TRIGGERS), default=None)
+    c.add_argument("--preset", default="", help="Camware .ini preset to take the settings from")
     c.add_argument("--interface", default="", help='e.g. "USB 3.0" or "CLHS" (default: search)')
     c.add_argument("--rows", type=int, default=64)
     c.add_argument("--exposure", type=float, default=100.0, help="µs")
@@ -212,7 +241,8 @@ def main(argv=None):
     c.add_argument("--timeout", type=float, default=15.0)
     c.add_argument("--save", default="", help="save 4 frames to this .npy file")
     s = sub.add_parser("stage")
-    s.add_argument("--port", default="COM3")
+    s.add_argument("--gpib", default="GPIB0::1::INSTR", help="VISA resource (default)")
+    s.add_argument("--port", default="", help="use a serial port instead of GPIB")
     s.add_argument("--baud", type=int, default=921600)
     s.add_argument("--move", action="store_true", help="move +0.010 mm and back")
     s.add_argument("--axis", type=int, default=1)
@@ -220,6 +250,9 @@ def main(argv=None):
     for p in (c, s):
         p.add_argument("--sim", action="store_true")
     args = ap.parse_args(argv)
+    if args.cmd == "camera":
+        args.trigger_given = args.trigger is not None
+        args.trigger = args.trigger or "auto"
     name = time.strftime(f"diagnose_{args.cmd}_%Y%m%d_%H%M%S.txt")
     with open(name, "w", encoding="utf-8") as f:
         _log_file = f

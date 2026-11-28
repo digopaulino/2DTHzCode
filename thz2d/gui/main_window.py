@@ -106,7 +106,7 @@ class MainWindow(QtWidgets.QMainWindow):
         w.error.connect(self._error)
         w.busy_changed.connect(self._busy_changed)
         w.camera_state.connect(self._camera_state)
-        w.stage_state.connect(lambda ok, msg: self.lbl_stage.setText(f"stage: {msg}"))
+        w.stage_state.connect(lambda ok, msg: self._short_label(self.lbl_stage, "stage", msg))
         self.chk_live.toggled.connect(self.live.setVisible)
 
         self.live_timer = QtCore.QTimer(self)
@@ -145,12 +145,18 @@ class MainWindow(QtWidgets.QMainWindow):
                               .get(name, name) if busy else "idle")
         self.lbl_busy.setStyleSheet(f"font-weight:bold; color:{'#f2c94c' if busy else '#7fd88f'};")
 
+    @staticmethod
+    def _short_label(label, what, msg, n=60):
+        msg = " ".join(str(msg).split())
+        label.setText(f"{what}: {msg[:n]}{'…' if len(msg) > n else ''}")
+        label.setToolTip(msg)
+
     def _camera_state(self, ok, info):
         self._camera_ok = ok
         if ok and isinstance(info, dict):
-            self.lbl_cam.setText(f"camera: {info.get('name', '')}")
+            self._short_label(self.lbl_cam, "camera", info.get("name", ""))
         else:
-            self.lbl_cam.setText(f"camera: {info}")
+            self._short_label(self.lbl_cam, "camera", info)
 
     def _status(self, msg):
         self.statusBar().showMessage(msg, 8000)
